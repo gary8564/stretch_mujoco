@@ -50,20 +50,50 @@ class StretchMujocoSimulator:
         self.wheel_separation = config.robot_settings["wheel_separation"]
         self.status = {
             "time": None,
-            "base": {"x_vel": None, "theta_vel": None},
-            "lift": {"pos": None, "vel": None},
-            "arm": {"pos": None, "vel": None},
-            "head_pan": {"pos": None, "vel": None},
-            "head_tilt": {"pos": None, "vel": None},
-            "wrist_yaw": {"pos": None, "vel": None},
-            "wrist_pitch": {"pos": None, "vel": None},
-            "wrist_roll": {"pos": None, "vel": None},
-            "gripper": {"pos": None, "vel": None},
+            "base": {
+                "x": None,
+                "y": None,
+                "theta": None,
+                "x_vel": None, 
+                "theta_vel": None
+            },
+            "lift": {
+                "pos": None, 
+                "vel": None, 
+                "motor": {"effort_pct": None}},
+            "arm": {
+                "pos": None, 
+                "vel": None,
+                "motor": {"effort_pct": None}},
+            "head_pan": {
+                "pos": None, 
+                "vel": None, 
+                "effort": None},
+            "head_tilt": {
+                "pos": None, 
+                "vel": None, 
+                "effort": None},
+            "wrist_yaw": {"pos": None, "vel": None, "effort": None},
+            "wrist_pitch": {"pos": None, "vel": None, "effort": None},
+            "wrist_roll": {"pos": None, "vel": None, "effort": None},
+            "gripper": {"pos": None, "pos_pct": None, "vel": None, "effort": None},
+            "pimu": {
+                "imu": {'ax': 0.0, 'ay': 0.0, 'az': 0.0,
+                        'gx': 0.0, 'gy': 0.0, 'gz': 0.0,
+                        'qw': 1.0, 'qx': 0.0, 'qy': 0.0, 'qz': 0.0}
+            },
+            "wacc": {
+                "ax": None,
+                "ay": None,
+                "az": None
+            }
         }
         self._running = False
         self.viewer = mujoco.viewer
         self._base_in_pos_motion = False
         self._headless_running = False
+        self.end_of_arm_name = 'gripper' 
+        self.mjmodel.opt.timestep = 0.002  # Increase from default
 
     def _set_camera_properties(self):
         """
@@ -99,6 +129,12 @@ class StretchMujocoSimulator:
         Move the robot to home position
         """
         self.mjdata.ctrl = self.mjmodel.keyframe("home").ctrl
+    
+    def is_homed(self) -> bool: #.TODO test this
+        if np.allclose(self.mjdata.ctrl, self.mjmodel.keyframe("home").ctrl):
+            return True
+        else:
+            return False
 
     def stow(self) -> None:
         """
@@ -143,12 +179,16 @@ class StretchMujocoSimulator:
                     threading.Thread(target=self._base_rotate_by, args=(pos,)).start()
             else:
                 if actuator_name == "gripper":
-                    self.mjdata.actuator(actuator_name).ctrl = self._to_sim_gripper_range(
-                        self.status[actuator_name]["pos"] + pos
+                    current_pos = self.status[actuator_name]["pos"]
+                    new_pos = self._to_sim_gripper_range(
+                        current_pos + pos
                     )
+                    self.mjdata.actuator(actuator_name).ctrl = new_pos
+                    self.status["gripper"]["pos"] = new_pos
                 else:
+                    current_pos = self.status[actuator_name]["pos"]
                     self.mjdata.actuator(actuator_name).ctrl = (
-                        self.status[actuator_name]["pos"] + pos
+                        current_pos + pos
                     )
         else:
             click.secho(
@@ -208,6 +248,11 @@ class StretchMujocoSimulator:
         world_coord = np.matmul(base_4x4, T)
         return world_coord
 
+    def get_lidar(self):
+        self.lidar_data = self.mjdata.sensordata[6:] #.TODO find function to return the correct data, hardcoded only temp fix
+        return [r if (r > 0.17) else 12.0 for r in self.lidar_data]
+
+
     def _pull_status(self) -> Dict[str, Any]:
         """
         Pull joints status of the robot from the simulator
@@ -215,31 +260,39 @@ class StretchMujocoSimulator:
         self.status["time"] = self.mjdata.time
         self.status["lift"]["pos"] = self.mjdata.actuator("lift").length[0]
         self.status["lift"]["vel"] = self.mjdata.actuator("lift").velocity[0]
+        self.status["lift"]["motor"]["effort_pct"] = self.calculate_effort(self.mjdata.actuator("lift").force[0])
 
         self.status["arm"]["pos"] = self.mjdata.actuator("arm").length[0]
         self.status["arm"]["vel"] = self.mjdata.actuator("arm").velocity[0]
+        self.status["arm"]["motor"]["effort_pct"] = self.calculate_effort(self.mjdata.actuator("arm").force[0])
 
         self.status["head_pan"]["pos"] = self.mjdata.actuator("head_pan").length[0]
         self.status["head_pan"]["vel"] = self.mjdata.actuator("head_pan").velocity[0]
+        self.status["head_pan"]["effort"] = self.calculate_effort(self.mjdata.actuator("head_pan").force[0])
 
         self.status["head_tilt"]["pos"] = self.mjdata.actuator("head_tilt").length[0]
         self.status["head_tilt"]["vel"] = self.mjdata.actuator("head_tilt").velocity[0]
+        self.status["head_tilt"]["effort"] = self.calculate_effort(self.mjdata.actuator("head_tilt").force[0])
 
         self.status["wrist_yaw"]["pos"] = self.mjdata.actuator("wrist_yaw").length[0]
         self.status["wrist_yaw"]["vel"] = self.mjdata.actuator("wrist_yaw").velocity[0]
+        self.status["wrist_yaw"]["effort"] = self.calculate_effort(self.mjdata.actuator("wrist_yaw").force[0])
 
         self.status["wrist_pitch"]["pos"] = self.mjdata.actuator("wrist_pitch").length[0]
         self.status["wrist_pitch"]["vel"] = self.mjdata.actuator("wrist_pitch").velocity[0]
-
+        self.status["wrist_pitch"]["effort"] = self.calculate_effort(self.mjdata.actuator("wrist_pitch").force[0])
+        
         self.status["wrist_roll"]["pos"] = self.mjdata.actuator("wrist_roll").length[0]
         self.status["wrist_roll"]["vel"] = self.mjdata.actuator("wrist_roll").velocity[0]
-
+        self.status["wrist_roll"]["effort"] = self.calculate_effort(self.mjdata.actuator("wrist_roll").force[0])
+        
         real_gripper_pos = self._to_real_gripper_range(self.mjdata.actuator("gripper").length[0])
-        self.status["gripper"]["pos"] = real_gripper_pos
+        # self.status["gripper"]["pos"] = real_gripper_pos
+        self.status["gripper"]["pos_pct"] = real_gripper_pos
         self.status["gripper"]["vel"] = self.mjdata.actuator("gripper").velocity[
             0
         ]  # This is still in sim gripper range
-
+        self.status["gripper"]["effort"] = self.calculate_effort(self.mjdata.actuator("gripper").force[0])
         left_wheel_vel = self.mjdata.actuator("left_wheel_vel").velocity[0]
         right_wheel_vel = self.mjdata.actuator("right_wheel_vel").velocity[0]
 
@@ -252,8 +305,35 @@ class StretchMujocoSimulator:
             self.status["base"]["x_vel"],
             self.status["base"]["theta_vel"],
         ) = self.diff_drive_fwd_kinematics(left_wheel_vel, right_wheel_vel)
+        self.status["base"]["y_vel"] = 0.0
+        #calculations partially taken from diff_drive_fwd_kinematics 
+        R = self.wheel_diameter / 2.0
+        linear_velocity = R * (left_wheel_vel + right_wheel_vel) / 2.0
+        self.status["wacc"]["ax"] = linear_velocity * np.cos(self.mjdata.qpos[2])
+        self.status["wacc"]["ay"] = linear_velocity * np.sin(self.mjdata.qpos[2])
+        self.status["wacc"]["az"] = -9.81
+        # PIMU
+        imu_gyro = self.mjdata.sensordata[0:3] #.TODO find function to return the correct data, hardcoded only temp fix
+        self.status["pimu"]["imu"]["gx"] = imu_gyro[0]
+        self.status["pimu"]["imu"]["gy"] = imu_gyro[1]
+        self.status["pimu"]["imu"]["gz"] = imu_gyro[2]
+        imu_accel = self.mjdata.sensordata[3:6] #.TODO find function to return the correct data, hardcoded only temp fix
+        self.status["pimu"]["imu"]["ax"] = imu_accel[0]
+        self.status["pimu"]["imu"]["ay"] = imu_accel[1]
+        self.status["pimu"]["imu"]["az"] = imu_accel[2]
+        imu_quat = self.mjdata.xquat[0] #.TODO should be correct index, because first def body in xml
+        self.status["pimu"]["imu"]["qw"] = imu_quat[0]
+        self.status["pimu"]["imu"]["qx"] = imu_quat[1]
+        self.status["pimu"]["imu"]["qy"] = imu_quat[2]
+        self.status["pimu"]["imu"]["qz"] = imu_quat[3]
 
         return self.status
+    
+    def get_status(self):
+        return self.status.copy()
+    
+    def calculate_effort(self, force): 
+        return force #.? * 100 / MAX_FORCE
 
     def pull_camera_data(self) -> dict:
         """
