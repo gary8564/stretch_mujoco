@@ -40,6 +40,9 @@ allowed_position_actuators = [
     "base_translate",
 ]
 
-base_motion = {"timeout": 15, "default_x_vel": 0.3, "default_r_vel": 1.0}
+# default value from hello robot:
+# default x vel: 0.3
+# default r vel: 1.0
+base_motion = {"timeout": 15, "default_x_vel": 0.2, "default_r_vel": 0.6}
 
 # TODO: Add params to tune joints response motion profiles

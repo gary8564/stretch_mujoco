@@ -93,6 +93,10 @@ class StretchMujocoSimulator:
         self._base_in_pos_motion = False
         self._headless_running = False
         self.end_of_arm_name = 'gripper' 
+        self.waypoints = []         # [time, [pos], [vel], [acc], [eff]] with joints in order!
+        self.trajectory = False
+        self.cur_wp_time = 0
+        self.lidar_data = None
         self.mjmodel.opt.timestep = 0.002  # Increase from default
 
     def _set_camera_properties(self):
@@ -332,6 +336,16 @@ class StretchMujocoSimulator:
     def get_status(self):
         return self.status.copy()
     
+    def get_specific_status(self, name):
+        for key, value in self.status:
+            if key == name:
+                return value
+            elif isinstance(value, dict):
+                for key, value in self.status:
+                    if key == name:
+                        return value
+        return None
+    
     def calculate_effort(self, force): 
         return force #.? * 100 / MAX_FORCE
 
@@ -397,6 +411,11 @@ class StretchMujocoSimulator:
         self.mjdata = data
         self.mjmodel = model
         self._pull_status()
+        if self.trajectory:
+            threading.Thread(
+                target=self.follow_waypoints, name="mujoco_headless_thread"
+            ).start()
+
 
     def diff_drive_inv_kinematics(self, V: float, omega: float) -> tuple:
         """
@@ -435,6 +454,78 @@ class StretchMujocoSimulator:
         omega = R * (w_right - w_left) / L
 
         return (V, omega)
+    
+    def add_waypoint(self, duration, positions, velocities, accelerations, effort):
+        #print("waypoints", self.waypoints)
+        new_waypoint = []
+        new_waypoint.append(self.mjdata.time + duration.sec + duration.nanosec)
+        new_waypoint.append(positions)
+        new_waypoint.append(velocities)
+        new_waypoint.append(accelerations)
+        new_waypoint.append(effort)
+        #following code copied from stretch_body.trajectories
+        if len(self.waypoints) == 0:
+            self.waypoints.append(new_waypoint)
+            return
+        if new_waypoint in self.waypoints:
+            return
+        if new_waypoint[0] < self.waypoints[0][0]:
+            self.waypoints.insert(0, new_waypoint)
+            return
+        if new_waypoint[0] > self.waypoints[0][0]:
+            self.waypoints.append(new_waypoint)
+            return
+        for i, other_waypoint in enumerate(self.waypoints):
+            if new_waypoint[0] < other_waypoint[0]:
+                self.waypoints.insert(i, new_waypoint)
+                return
+
+    def stop_trajectory(self):
+        self.set_base_velocity(0.0, 0.0)
+        self.move_to('arm', 0.0)
+        self.move_to('lift', 0.0)
+        self.move_to('head_pan', 0.0)
+        self.move_to('head_tilt', 0.0)
+        self.move_to('wrist_yaw', 0.0)
+        self.move_to('wrist_pitch', 0.0)
+        self.move_to('wrist_roll', 0.0)
+        self.move_to('gripper', 0.0)
+        self.clear_trajectory()
+        #.TODO test if this is working
+    
+    def clear_trajectory(self):
+        self.waypoints = []
+    
+    def follow_trajectory(self):
+        if len(self.waypoints) == 0: #.TODO add more poss abort conditions
+            #print("No waypoints")
+            return False
+        self.trajectory = True
+        return True
+
+    def follow_waypoints(self):
+        # for simplicity we ignore vel, acc and eff for now
+        if len(self.waypoints) == 0:
+            return
+        if self.waypoints[0][0] < self.mjdata.time:
+            self.waypoints.pop(0)
+            if len(self.waypoints) == 0:
+                return
+        if self.waypoints[0][0] == self.cur_wp_time:
+            return
+        cur_waypoint = self.waypoints[0][1]
+        self.cur_wp_time = self.waypoints[0][0]
+        self._base_translate_by(cur_waypoint[0])
+        self._base_rotate_by_relative_to_world(cur_waypoint[1])
+        self.move_to('lift', cur_waypoint[2])
+        self.move_to('arm', cur_waypoint[3])
+        self.move_to('head_pan', cur_waypoint[4])
+        self.move_to('head_tilt', cur_waypoint[5])
+        self.move_to('wrist_yaw', cur_waypoint[6])
+        self.move_to('wrist_pitch', cur_waypoint[7])
+        self.move_to('wrist_roll', cur_waypoint[8])
+        self.move_to('gripper', cur_waypoint[9])
+        self.waypoints.pop(0)
 
     def __run(self, show_viewer_ui: bool) -> None:
         """
@@ -510,6 +601,29 @@ class StretchMujocoSimulator:
                 break
         self.set_base_velocity(0, 0)
         self._base_in_pos_motion = False
+
+    def _base_rotate_by_relative_to_world(self, theta_inc: float) -> None:
+        """
+        Rotate the base by a certain w.r.t base global pose
+        """
+        start_pose = self.get_base_pose()[-1]
+        self._base_in_pos_motion = True
+        sign = 1 if ((theta_inc - start_pose)% 6.283185) < 3.141592 else -1
+        start_ts = time.perf_counter()
+        while (sign * (theta_inc - self.get_base_pose()[-1]))% 6.283185 < 3.141592: 
+            if self._base_in_pos_motion:
+                self.set_base_velocity(
+                    0, config.base_motion["default_r_vel"] * sign, _override=True
+                )
+                time.sleep(1 / 30)
+                if time.perf_counter() - start_ts > config.base_motion["timeout"]:
+                    click.secho("Base rotation timeout", fg="red")
+                    break
+            else:
+                break
+        self.set_base_velocity(0, 0)
+        self._base_in_pos_motion = False
+
 
     def is_running(self) -> bool:
         """
